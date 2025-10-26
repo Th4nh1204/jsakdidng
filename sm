@@ -1,0 +1,176 @@
+-- ================== PRETTY CONFIG EXPORT/IMPORT (PASTE-AND-USE) ==================
+-- Dán toàn bộ khối này vào cuối file của bạn (sau khi đã set getgenv().Config = {...})
+-- Sau đó gọi:
+--   local ok, path = ExportConfigToObjects("MyPrettyConfig")  -- xuất JSON đẹp
+--   local ok2 = ImportObjectsToConfig("MyPrettyConfig")       -- nạp lại JSON vào getgenv().Config
+
+local HttpService = game:GetService("HttpService")
+
+-- ===== Helpers =====
+local function shallowKeys(t)
+    local r = {}
+    for k,_ in pairs(t) do table.insert(r, k) end
+    table.sort(r, function(a,b) return tostring(a) < tostring(b) end)
+    return r
+end
+
+local function isBoolTable(t)
+    if type(t) ~= "table" then return false end
+    local has = false
+    for _,v in pairs(t) do
+        if type(v) ~= "boolean" then return false end
+        has = true
+    end
+    return has
+end
+
+local function joinPath(base, key)
+    if base == "" then return tostring(key) end
+    return base .. "." .. tostring(key)
+end
+
+local function safe_isfolder(p) return pcall(function() return isfolder and isfolder(p) end) and isfolder(p) end
+local function safe_makefolder(p) if makefolder and not safe_isfolder(p) then pcall(makefolder, p) end end
+local function safe_isfile(p) return pcall(function() return isfile and isfile(p) end) and isfile(p) end
+local function safe_writefile(p, data) if writefile then pcall(writefile, p, data) end end
+local function safe_readfile(p)
+    if not readfile then return nil end
+    local ok, res = pcall(readfile, p)
+    return ok and res or nil
+end
+
+-- ===== Walk Config -> objects[] =====
+local function walkConfig(cfg, basePath, out)
+    for _, key in ipairs(shallowKeys(cfg)) do
+        local v = cfg[key]
+        local idx = joinPath(basePath, key)
+
+        if type(v) == "boolean" then
+            table.insert(out, { idx = idx, type = "Toggle", value = v })
+
+        elseif type(v) == "string" then
+            table.insert(out, { idx = idx, type = "Input", text = v })
+
+        elseif type(v) == "number" then
+            table.insert(out, { idx = idx, type = "Slider", value = tostring(v) })
+
+        elseif type(v) == "table" then
+            if isBoolTable(v) then
+                local chosen = {}
+                for subk, subv in pairs(v) do
+                    if subv == true then table.insert(chosen, tostring(subk)) end
+                end
+                table.sort(chosen)
+                table.insert(out, {
+                    idx = idx,
+                    type = "Dropdown",
+                    mutli = true,  -- cố ý giữ đúng key "mutli" để tương thích
+                    value = chosen
+                })
+            else
+                walkConfig(v, idx, out)
+            end
+        end
+    end
+end
+
+-- ===== paths =====
+local function setByPath(tbl, path, value)
+    local cur = tbl
+    local parts = {}
+    for p in string.gmatch(path, "([^%.]+)") do table.insert(parts, p) end
+    for i = 1, #parts-1 do
+        local k = parts[i]
+        if type(cur[k]) ~= "table" then cur[k] = {} end
+        cur = cur[k]
+    end
+    cur[parts[#parts]] = value
+end
+
+local function ensurePathTable(tbl, path)
+    local cur = tbl
+    local parts = {}
+    for p in string.gmatch(path, "([^%.]+)") do table.insert(parts, p) end
+    for i = 1, #parts do
+        local k = parts[i]
+        if type(cur[k]) ~= "table" then cur[k] = {} end
+        cur = cur[k]
+    end
+end
+
+-- ===== Public API =====
+function ExportConfigToObjects(name, root)
+    name = name or "MyPrettyConfig"
+    root = root or getgenv().Config
+    if type(root) ~= "table" then
+        return false, "getgenv().Config is not a table"
+    end
+
+    local objects = {}
+    walkConfig(root, "", objects)
+    local data = { objects = objects }
+    local encoded
+    local okEnc, errEnc = pcall(function() encoded = HttpService:JSONEncode(data) end)
+    if not okEnc then return false, "JSONEncode failed: "..tostring(errEnc) end
+
+    local baseFolder = "FluentSettings"
+    local folder = baseFolder .. "/settings"
+    safe_makefolder(baseFolder)
+    safe_makefolder(folder)
+    local path = string.format("%s/%s.json", folder, name)
+    safe_writefile(path, encoded)
+    return true, path
+end
+
+function ImportObjectsToConfig(name, target)
+    name = name or "MyPrettyConfig"
+    target = target or getgenv().Config
+    if type(target) ~= "table" then return false, "Config target is not a table" end
+
+    local path = string.format("FluentSettings/settings/%s.json", name)
+    if not safe_isfile(path) then return false, "file not found: "..path end
+
+    local content = safe_readfile(path)
+    if not content then return false, "cannot read file: "..path end
+
+    local okDec, decoded = pcall(function() return HttpService:JSONDecode(content) end)
+    if not okDec or type(decoded) ~= "table" or type(decoded.objects) ~= "table" then
+        return false, "invalid json"
+    end
+
+    local out = target
+    for _, obj in ipairs(decoded.objects) do
+        local t, idx = obj.type, obj.idx
+
+        if t == "Toggle" and type(obj.value) == "boolean" then
+            setByPath(out, idx, obj.value)
+
+        elseif t == "Input" and type(obj.text) == "string" then
+            setByPath(out, idx, obj.text)
+
+        elseif t == "Slider" and obj.value ~= nil then
+            local num = tonumber(obj.value)
+            if num ~= nil then setByPath(out, idx, num) end
+
+        elseif t == "Dropdown" then
+            if obj.mutli and type(obj.value) == "table" then
+                ensurePathTable(out, idx)
+                local cur = out
+                for part in string.gmatch(idx, "([^%.]+)") do cur = cur[part] end
+                for k,_ in pairs(cur) do cur[k] = false end
+                for _, choice in ipairs(obj.value) do cur[choice] = true end
+            else
+                if obj.value ~= nil then setByPath(out, idx, obj.value) end
+            end
+        end
+    end
+
+    return true, out
+end
+
+-- ====== Ví dụ dùng (bật/tắt tuỳ nhu cầu) ======
+-- local ok, path = ExportConfigToObjects("MyPrettyConfig"); print("Export ->", ok, path)
+-- local ok2 = ImportObjectsToConfig("MyPrettyConfig");     print("Import ->", ok2)
+
+-- ==============================================================================
+
