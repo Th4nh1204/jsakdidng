@@ -1,7 +1,0 @@
-if game.PlaceId == 4855457388 then
-    loadstring(game:HttpGet("https://raw.githubusercontent.com/Th4nh1204/jsakdidng/main/dfall", true))()
-elseif game.PlaceId == 91044031354778 then
-    loadstring(game:HttpGet("https://raw.githubusercontent.com/Th4nh1204/jsakdidng/main/mop", true))()
-else
-    warn("")
-end
